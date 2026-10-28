@@ -1,0 +1,41 @@
+{
+  "response_header_hex": "0000",
+  "cases": [
+    {
+      "name": "IPv4 with initial payload",
+      "wire_hex": "0000112233445566778899aabbccddeeff000101bb01c0000201010203",
+      "address_type": "ipv4",
+      "host": "192.0.2.1",
+      "port": 443,
+      "initial_payload_hex": "010203",
+      "fragmentations": [
+        { "name": "single chunk", "chunk_sizes": [29] },
+        { "name": "header split after UUID", "chunk_sizes": [18, 11] }
+      ]
+    },
+    {
+      "name": "domain",
+      "wire_hex": "0000112233445566778899aabbccddeeff000101bb020b6578616d706c652e636f6d",
+      "address_type": "domain",
+      "host": "example.com",
+      "port": 443,
+      "initial_payload_hex": "",
+      "fragmentations": [
+        { "name": "single chunk", "chunk_sizes": [34] },
+        { "name": "header split after UUID", "chunk_sizes": [18, 16] }
+      ]
+    },
+    {
+      "name": "IPv6",
+      "wire_hex": "0000112233445566778899aabbccddeeff000101bb0320010db8000000000000000000000001aabb",
+      "address_type": "ipv6",
+      "host": "2001:db8::1",
+      "port": 443,
+      "initial_payload_hex": "aabb",
+      "fragmentations": [
+        { "name": "single chunk", "chunk_sizes": [40] },
+        { "name": "header split after UUID", "chunk_sizes": [18, 22] }
+      ]
+    }
+  ]
+}
