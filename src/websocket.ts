@@ -214,17 +214,19 @@ export class TunnelSession {
 
     // Log sizes and counters only; never log payload contents.
     if (isWebSocketFrame && this.#receivedMessages <= MAX_DIAGNOSTIC_MESSAGES) {
-      console.log("[diag] WebSocket frame received", {
-        frame: this.#receivedMessages,
-        authenticated: this.#authenticated,
-        bytes: byteLength,
-        totalBytes: this.#receivedClientBytes
-      });
+      if (process.env.NODE_ENV !== "production")
+        console.log("[diag] WebSocket frame received", {
+          frame: this.#receivedMessages,
+          authenticated: this.#authenticated,
+          bytes: byteLength,
+          totalBytes: this.#receivedClientBytes
+        });
     } else if (!isWebSocketFrame) {
-      console.log("[diag] WebSocket early data received", {
-        bytes: byteLength,
-        totalBytes: this.#receivedClientBytes
-      });
+      if (process.env.NODE_ENV !== "production")
+        console.log("[diag] WebSocket early data received", {
+          bytes: byteLength,
+          totalBytes: this.#receivedClientBytes
+        });
     }
 
     this.#queuedClientBytes += byteLength;
@@ -262,23 +264,26 @@ export class TunnelSession {
     // payload bytes. This keeps requests on the Vl and Tr paths isolated.
     if (!this.#protocolLogged) {
       this.#protocolLogged = true;
-      console.log("[diag] inbound protocol selected", { protocol: this.#protocol });
+      if (process.env.NODE_ENV !== "production")
+        console.log("[diag] inbound protocol selected", { protocol: this.#protocol });
     }
 
     // After the handshake has completed, all bytes are raw TCP payload for
     // either protocol; protocol parsing must never run a second time.
     if (this.#writer !== undefined) {
-      console.log("[diag] client payload forwarding", {
-        protocol: this.#protocol,
-        bytes: bytes.byteLength
-      });
+      if (process.env.NODE_ENV !== "production")
+        console.log("[diag] client payload forwarding", {
+          protocol: this.#protocol,
+          bytes: bytes.byteLength
+        });
 
       await this.#writer.write(bytes);
 
-      console.log("[diag] client payload forwarded", {
-        protocol: this.#protocol,
-        bytes: bytes.byteLength
-      });
+      if (process.env.NODE_ENV !== "production")
+        console.log("[diag] client payload forwarded", {
+          protocol: this.#protocol,
+          bytes: bytes.byteLength
+        });
 
       return;
     }
@@ -324,12 +329,13 @@ export class TunnelSession {
       initialPayload = parsed.initialPayload;
       this.#authenticated = true;
 
-      console.log("[diag] Tr request parsed", {
-        destination: destinationRequest.host,
-        port: destinationRequest.port,
-        initialPayloadBytes: initialPayload.byteLength
-      });
-      console.log("[diag] Tr password authentication succeeded");
+      if (process.env.NODE_ENV !== "production")
+        console.log("[diag] Tr request parsed", {
+          destination: destinationRequest.host,
+          port: destinationRequest.port,
+          initialPayloadBytes: initialPayload.byteLength
+        });
+      if (process.env.NODE_ENV !== "production") console.log("[diag] Tr password authentication succeeded");
     } else {
       let parsed;
 
@@ -351,14 +357,15 @@ export class TunnelSession {
 
       if (parsed === undefined) return;
 
-      console.log("[diag] Vl request parsed", {
-        destination: parsed.request.destination.host,
-        port: parsed.request.destination.port,
-        initialPayloadBytes: parsed.initialPayload.byteLength
-      });
+      if (process.env.NODE_ENV !== "production")
+        console.log("[diag] Vl request parsed", {
+          destination: parsed.request.destination.host,
+          port: parsed.request.destination.port,
+          initialPayloadBytes: parsed.initialPayload.byteLength
+        });
 
       if (!authenticateUser(parsed.request.userId, this.#credential.uuid)) {
-        console.log("[diag] Vl authentication failed");
+        if (process.env.NODE_ENV !== "production") console.log("[diag] Vl authentication failed");
         this.#requestClose(1008, CLOSE_REASON.authenticationFailed);
         return;
       }
@@ -366,7 +373,7 @@ export class TunnelSession {
       this.#authenticated = true;
       destinationRequest = parsed.request.destination;
       initialPayload = parsed.initialPayload;
-      console.log("[diag] Vl authentication succeeded");
+      if (process.env.NODE_ENV !== "production") console.log("[diag] Vl authentication succeeded");
     }
 
     clearTimeout(this.#handshakeTimer);
@@ -422,11 +429,12 @@ export class TunnelSession {
 
     if (this.#closed) return;
 
-    console.log("[diag] destination resolved", {
-      protocol: this.#protocol,
-      host: destination.hostname,
-      port: destination.port
-    });
+    if (process.env.NODE_ENV !== "production")
+      console.log("[diag] destination resolved", {
+        protocol: this.#protocol,
+        host: destination.hostname,
+        port: destination.port
+      });
 
     const connectController = new AbortController();
     this.#connectAbortController = connectController;
@@ -446,11 +454,12 @@ export class TunnelSession {
       }
     }
 
-    console.log("[diag] destination TCP connected", {
-      protocol: this.#protocol,
-      host: destination.hostname,
-      port: destination.port
-    });
+    if (process.env.NODE_ENV !== "production")
+      console.log("[diag] destination TCP connected", {
+        protocol: this.#protocol,
+        host: destination.hostname,
+        port: destination.port
+      });
 
     if (this.#closed) {
       await socket.close();
@@ -463,17 +472,19 @@ export class TunnelSession {
     this.#sendResponseHeader();
 
     if (initialPayload.byteLength > 0) {
-      console.log("[diag] initial client payload forwarding", {
-        protocol: this.#protocol,
-        bytes: initialPayload.byteLength
-      });
+      if (process.env.NODE_ENV !== "production")
+        console.log("[diag] initial client payload forwarding", {
+          protocol: this.#protocol,
+          bytes: initialPayload.byteLength
+        });
 
       await this.#writer.write(initialPayload);
 
-      console.log("[diag] initial client payload forwarded", {
-        protocol: this.#protocol,
-        bytes: initialPayload.byteLength
-      });
+      if (process.env.NODE_ENV !== "production")
+        console.log("[diag] initial client payload forwarded", {
+          protocol: this.#protocol,
+          bytes: initialPayload.byteLength
+        });
     }
 
     void this.#pumpDestination(socket, destination).catch(() => {
@@ -498,11 +509,12 @@ export class TunnelSession {
       this.#sentDestinationBytes += chunk.byteLength;
 
       if (this.#sentDestinationMessages <= MAX_DIAGNOSTIC_MESSAGES) {
-        console.log("[diag] destination WebSocket send", {
-          message: this.#sentDestinationMessages,
-          bytes: chunk.byteLength,
-          totalBytes: this.#sentDestinationBytes
-        });
+        if (process.env.NODE_ENV !== "production")
+          console.log("[diag] destination WebSocket send", {
+            message: this.#sentDestinationMessages,
+            bytes: chunk.byteLength,
+            totalBytes: this.#sentDestinationBytes
+          });
       }
 
       // The server-side WebSocket API has no bufferedAmount. Yield between
@@ -521,13 +533,14 @@ export class TunnelSession {
         readCount += 1;
 
         if (readCount <= MAX_DIAGNOSTIC_MESSAGES) {
-          console.log("[diag] destination read", {
-            read: readCount,
-            host: destination.hostname,
-            port: destination.port,
-            done: result.done,
-            bytes: result.value?.byteLength ?? 0
-          });
+          if (process.env.NODE_ENV !== "production")
+            console.log("[diag] destination read", {
+              read: readCount,
+              host: destination.hostname,
+              port: destination.port,
+              done: result.done,
+              bytes: result.value?.byteLength ?? 0
+            });
         }
 
         if (result.done) {
@@ -548,17 +561,18 @@ export class TunnelSession {
   #requestClose(code?: number, reason?: string): void {
     if (this.#closed) return;
 
-    console.log("[diag] session closing", {
-      code,
-      reason,
-      authenticated: this.#authenticated,
-      responseSent: this.#responseSent,
-      tcpConnected: this.#socket !== undefined,
-      receivedFrames: this.#receivedMessages,
-      receivedClientBytes: this.#receivedClientBytes,
-      sentDestinationMessages: this.#sentDestinationMessages,
-      sentDestinationBytes: this.#sentDestinationBytes
-    });
+    if (process.env.NODE_ENV !== "production")
+      console.log("[diag] session closing", {
+        code,
+        reason,
+        authenticated: this.#authenticated,
+        responseSent: this.#responseSent,
+        tcpConnected: this.#socket !== undefined,
+        receivedFrames: this.#receivedMessages,
+        receivedClientBytes: this.#receivedClientBytes,
+        sentDestinationMessages: this.#sentDestinationMessages,
+        sentDestinationBytes: this.#sentDestinationBytes
+      });
 
     this.#closed = true;
 
