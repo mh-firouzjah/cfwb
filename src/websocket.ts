@@ -229,6 +229,13 @@ export class TunnelSession {
         });
     }
 
+    if (
+      (typeof data === "string" && data.length === 0) ||
+      (data instanceof ArrayBuffer && data.byteLength === 0) ||
+      (ArrayBuffer.isView(data) && data.byteLength === 0)
+    ) {
+      return;
+    }
     this.#queuedClientBytes += byteLength;
 
     if (this.#queuedClientBytes > MAX_QUEUED_CLIENT_BYTES) {
