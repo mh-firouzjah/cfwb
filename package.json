@@ -10,18 +10,18 @@
     "npm": ">=11.0.0"
   },
   "scripts": {
-    "check": "npm run format:check && npm run lint && npm run typecheck && npm test",
+    "check": "npm --silent run format:check; f=$?; npm --silent run lint; l=$?; npm --silent run typecheck; t=$?; npm --silent test; s=$?; printf '\\ncheck summary (0=ok): format=%s lint=%s typecheck=%s test=%s\\n' \"$f\" \"$l\" \"$t\" \"$s\"; [ \"$f$l$t$s\" = 0000 ]",
     "deploy": "wrangler deploy",
     "dev": "wrangler dev",
     "format": "prettier --write README.md src test vitest.config.ts wrangler.jsonc tsconfig.json package.json",
-    "format:check": "prettier --check README.md src test vitest.config.ts wrangler.jsonc tsconfig.json package.json",
-    "lint": "oxlint --type-aware --vitest-plugin --deny-warnings --report-unused-disable-directives src test && oxlint --vitest-plugin --deny-warnings --report-unused-disable-directives vitest.config.ts",
-    "test": "vitest run --silent --reporter=dot",
+    "format:check": "prettier --log-level=warn --list-different README.md src test vitest.config.ts wrangler.jsonc tsconfig.json package.json",
+    "lint": "oxlint --format=agent --type-aware --vitest-plugin --deny-warnings --report-unused-disable-directives src test && oxlint --format=agent --vitest-plugin --deny-warnings --report-unused-disable-directives vitest.config.ts",
+    "test": "WRANGLER_LOG=warn vitest run --silent=passed-only --reporter=minimal",
     "test:verbose": "vitest run --silent=false --reporter=verbose",
     "typecheck": "tsc --noEmit && tsc --noEmit -p test/tsconfig.json"
   },
   "devDependencies": {
-    "@cloudflare/vitest-plugin": "1.4.7",
+    "@cloudflare/vitest-plugin": "1.4.11",
     "@cloudflare/workers-types": "5.20261024.1",
     "@types/node": "26.6.5",
     "oxlint": "1.89.0",
@@ -29,14 +29,14 @@
     "prettier": "3.9.10",
     "typescript": "7.0.2",
     "vitest": "5.0.5",
-    "wrangler": "4.152.0",
+    "wrangler": "4.156.0",
     "ws": "8.21.0"
   },
   "allowScripts": {
     "esbuild@0.28.1": true,
     "esbuild@0.28.2": true,
     "fsevents@2.3.3": true,
-    "sharp@0.34.5": true,
-    "workerd@1.20261019.1": true
+    "sharp@0.35.5": true,
+    "workerd@1.20261023.1": true
   }
 }

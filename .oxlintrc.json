@@ -18,7 +18,7 @@
       }
     },
     {
-      "files": ["src/websocket.ts", "test/session.test.ts"],
+      "files": ["src/transport/websocket.ts", "test/session.test.ts"],
       "rules": {
         "eslint/no-await-in-loop": "off"
       }

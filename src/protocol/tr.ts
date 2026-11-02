@@ -1,17 +1,17 @@
 import { createHash } from "node:crypto";
 
-import type { VlDestination } from "./vl";
+import { concatenate, decodeDomain, formatIPv4, formatIPv6, type Destination } from "./wire";
 
 export function sha224Hex(message: Uint8Array): string {
   return createHash("sha224").update(message).digest("hex");
 }
 
 export const MAX_TR_HANDSHAKE_BYTES = 1024;
+export const MAX_TR_PASSWORD_BYTES = 512;
 const PASSWORD_HASH_BYTES = 56;
 const CRLF = 0x0d;
 const LF = 0x0a;
 const TR_COMMAND_TCP = 0x01;
-const TR_COMMAND_UDP = 0x03;
 
 export type TrProtocolErrorCode =
   | "authentication_failed"
@@ -34,22 +34,13 @@ export class TrProtocolError extends Error {
 }
 
 export interface ParsedTrHandshake {
-  readonly destination: VlDestination;
+  readonly destination: Destination;
   readonly initialPayload: Uint8Array;
 }
 
 interface HeaderParseResult {
-  readonly destination: VlDestination;
+  readonly destination: Destination;
   readonly headerLength: number;
-}
-
-function concatenate(left: Uint8Array, right: Uint8Array): Uint8Array {
-  if (left.byteLength === 0) return right.slice();
-  if (right.byteLength === 0) return left.slice();
-  const result = new Uint8Array(left.byteLength + right.byteLength);
-  result.set(left);
-  result.set(right, left.byteLength);
-  return result;
 }
 
 function constantTimeHashMatch(received: Uint8Array, expected: Uint8Array): boolean {
@@ -60,63 +51,14 @@ function constantTimeHashMatch(received: Uint8Array, expected: Uint8Array): bool
   return difference === 0;
 }
 
-function decodeDomain(bytes: Uint8Array): string {
-  if (bytes.byteLength === 0 || bytes.byteLength > 253) throw new TrProtocolError("invalid_domain");
-  let domain = "";
-  for (const byte of bytes) {
-    const valid =
-      (byte >= 0x41 && byte <= 0x5a) ||
-      (byte >= 0x61 && byte <= 0x7a) ||
-      (byte >= 0x30 && byte <= 0x39) ||
-      byte === 0x2d ||
-      byte === 0x2e;
-    if (!valid) throw new TrProtocolError("invalid_domain");
-    domain += String.fromCharCode(byte);
-  }
-  if (domain.startsWith(".") || domain.endsWith(".") || domain.includes("..")) {
-    throw new TrProtocolError("invalid_domain");
-  }
-  return domain;
-}
-
-function formatIPv6(bytes: Uint8Array): string {
-  const words: number[] = [];
-  for (let offset = 0; offset < 16; offset += 2) {
-    words.push((bytes[offset]! << 8) | bytes[offset + 1]!);
-  }
-
-  let bestStart = -1;
-  let bestLength = 0;
-  for (let index = 0; index < words.length;) {
-    if (words[index] !== 0) {
-      index += 1;
-      continue;
-    }
-    let end = index + 1;
-    while (end < words.length && words[end] === 0) end += 1;
-    if (end - index > bestLength) {
-      bestStart = index;
-      bestLength = end - index;
-    }
-    index = end;
-  }
-
-  if (bestLength < 2) return words.map((word) => word.toString(16)).join(":");
-  const left = words
-    .slice(0, bestStart)
-    .map((word) => word.toString(16))
-    .join(":");
-  const right = words
-    .slice(bestStart + bestLength)
-    .map((word) => word.toString(16))
-    .join(":");
-  if (left.length === 0 && right.length === 0) return "::";
-  if (left.length === 0) return `::${right}`;
-  if (right.length === 0) return `${left}::`;
-  return `${left}::${right}`;
-}
-
 function parseHeader(bytes: Uint8Array, expectedPasswordHash: Uint8Array): HeaderParseResult | undefined {
+  const digestPrefixLength = Math.min(bytes.byteLength, PASSWORD_HASH_BYTES);
+  for (let index = 0; index < digestPrefixLength; index += 1) {
+    const byte = bytes[index]!;
+    const isLowerHex = (byte >= 0x30 && byte <= 0x39) || (byte >= 0x61 && byte <= 0x66);
+    if (!isLowerHex) throw new TrProtocolError("invalid_header");
+  }
+
   if (bytes.byteLength < PASSWORD_HASH_BYTES + 2) return undefined;
 
   if (!constantTimeHashMatch(bytes.subarray(0, PASSWORD_HASH_BYTES), expectedPasswordHash)) {
@@ -128,36 +70,31 @@ function parseHeader(bytes: Uint8Array, expectedPasswordHash: Uint8Array): Heade
   if (bytes.byteLength < 60) return undefined;
 
   const command = bytes[58]!;
-  if (command !== TR_COMMAND_TCP) {
-    if (command === TR_COMMAND_UDP) throw new TrProtocolError("unsupported_command");
-    throw new TrProtocolError("unsupported_command");
-  }
+  if (command !== TR_COMMAND_TCP) throw new TrProtocolError("unsupported_command");
 
   const addressType = bytes[59]!;
   let addressLength: number;
   let addressOffset: number;
-  let type: VlDestination["type"];
   let host: string;
 
   if (addressType === 0x01) {
     addressLength = 4;
     addressOffset = 60;
     if (bytes.byteLength < addressOffset + addressLength) return undefined;
-    type = "ipv4";
-    host = Array.from(bytes.subarray(addressOffset, addressOffset + addressLength)).join(".");
+    host = formatIPv4(bytes.subarray(addressOffset, addressOffset + addressLength));
   } else if (addressType === 0x03) {
     if (bytes.byteLength < 61) return undefined;
     addressLength = bytes[60]!;
     addressOffset = 61;
-    if (addressLength === 0 || addressLength > 253) throw new TrProtocolError("invalid_domain");
+    if (addressLength === 0) throw new TrProtocolError("invalid_domain");
     if (bytes.byteLength < addressOffset + addressLength) return undefined;
-    type = "domain";
-    host = decodeDomain(bytes.subarray(addressOffset, addressOffset + addressLength));
+    const domain = decodeDomain(bytes.subarray(addressOffset, addressOffset + addressLength));
+    if (domain === undefined) throw new TrProtocolError("invalid_domain");
+    host = domain;
   } else if (addressType === 0x04) {
     addressLength = 16;
     addressOffset = 60;
     if (bytes.byteLength < addressOffset + addressLength) return undefined;
-    type = "ipv6";
     host = formatIPv6(bytes.subarray(addressOffset, addressOffset + addressLength));
   } else {
     throw new TrProtocolError("invalid_address_type");
@@ -172,7 +109,7 @@ function parseHeader(bytes: Uint8Array, expectedPasswordHash: Uint8Array): Heade
     throw new TrProtocolError("invalid_header");
   }
 
-  return { destination: { type, host, port }, headerLength };
+  return { destination: { host, port }, headerLength };
 }
 
 /**
@@ -188,7 +125,7 @@ export class TrHandshakeParser {
 
   constructor(password: string, maximumBytes = MAX_TR_HANDSHAKE_BYTES) {
     const passwordBytes = new TextEncoder().encode(password);
-    if (passwordBytes.byteLength === 0 || passwordBytes.byteLength > 512) {
+    if (passwordBytes.byteLength === 0 || passwordBytes.byteLength > MAX_TR_PASSWORD_BYTES) {
       throw new RangeError("Tr password length is invalid");
     }
     if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 64) {

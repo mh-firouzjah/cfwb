@@ -1,11 +1,18 @@
-import { describe, expect, it } from "vitest";
-import { waitForSocketOpen } from "../src/tcp";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-function pendingSocket(): { socket: Socket; closeCalls: () => number } {
+const { connectMock } = vi.hoisted(() => ({ connectMock: vi.fn<(...args: unknown[]) => unknown>() }));
+vi.mock("cloudflare:sockets", () => ({ connect: connectMock }));
+
+import { connectTCP, waitForSocketOpen } from "../src/transport/tcp";
+
+function mockSocket(opened: Promise<SocketInfo> = Promise.resolve({ remoteAddress: "93.184.216.34:443" })): {
+  socket: Socket;
+  closeCalls: () => number;
+} {
   let closes = 0;
   let socket: Socket;
   socket = {
-    opened: new Promise<SocketInfo>(() => undefined),
+    opened,
     closed: new Promise<void>(() => undefined),
     readable: new ReadableStream<Uint8Array>(),
     writable: new WritableStream<Uint8Array>(),
@@ -19,36 +26,189 @@ function pendingSocket(): { socket: Socket; closeCalls: () => number } {
   return { socket, closeCalls: () => closes };
 }
 
-describe("outbound TCP connection deadline", () => {
-  it("closes a socket that does not open before the timeout", async () => {
-    const pending = pendingSocket();
-    await expect(waitForSocketOpen(pending.socket, 10)).rejects.toThrow("connection timed out");
+afterEach(() => {
+  connectMock.mockReset();
+  vi.useRealTimers();
+});
+
+describe("outbound TCP open", () => {
+  it("closes the socket when its open operation rejects", async () => {
+    const failure = new Error("socket open failed");
+    const pending = mockSocket(Promise.reject(failure));
+    await expect(waitForSocketOpen(pending.socket, new AbortController().signal)).rejects.toBe(failure);
     expect(pending.closeCalls()).toBe(1);
   });
 
-  it("returns an opened socket and cancels the deadline", async () => {
-    const pending = pendingSocket();
-    const opened = Object.defineProperty(pending.socket, "opened", {
-      value: Promise.resolve({ remoteAddress: "93.184.216.34:443" } satisfies SocketInfo)
-    });
-    await expect(waitForSocketOpen(opened, 100)).resolves.toBe(opened);
+  it("resolves for an opened socket without closing it", async () => {
+    const pending = mockSocket();
+    await expect(waitForSocketOpen(pending.socket, new AbortController().signal)).resolves.toBeUndefined();
     expect(pending.closeCalls()).toBe(0);
   });
 
   it("closes a pending socket immediately when its session is canceled", async () => {
-    const pending = pendingSocket();
+    vi.useFakeTimers();
+    const pending = mockSocket(new Promise<SocketInfo>(() => undefined));
     const controller = new AbortController();
-    const opening = waitForSocketOpen(pending.socket, 1_000, controller.signal);
-
+    const opening = waitForSocketOpen(pending.socket, controller.signal);
     controller.abort();
-
     await expect(opening).rejects.toThrow("connection canceled");
+    expect(pending.closeCalls()).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("honors an AbortSignal that was already aborted", async () => {
+    const pending = mockSocket(new Promise<SocketInfo>(() => undefined));
+    const controller = new AbortController();
+    controller.abort();
+    await expect(waitForSocketOpen(pending.socket, controller.signal)).rejects.toThrow("connection canceled");
     expect(pending.closeCalls()).toBe(1);
   });
 
-  it("fails closed for an invalid timeout", async () => {
-    const pending = pendingSocket();
-    await expect(waitForSocketOpen(pending.socket, 0)).rejects.toThrow("connection timeout is invalid");
+  it("preserves an explicit cancellation reason", async () => {
+    const pending = mockSocket(new Promise<SocketInfo>(() => undefined));
+    const controller = new AbortController();
+    const reason = new Error("session disposed");
+    const opening = waitForSocketOpen(pending.socket, controller.signal);
+    controller.abort(reason);
+    await expect(opening).rejects.toBe(reason);
+  });
+
+  it("preserves the original error when socket cleanup also fails", async () => {
+    const pending = mockSocket(new Promise<SocketInfo>(() => undefined));
+    pending.socket.close = async () => {
+      throw new Error("synthetic close failure");
+    };
+    const controller = new AbortController();
+    const opening = waitForSocketOpen(pending.socket, controller.signal);
+    controller.abort();
+    await expect(opening).rejects.toThrow("connection canceled");
+  });
+
+  it("does not retry a destination rejected by the runtime", async () => {
+    const blocked = new Error("proxy request failed, cannot connect to the specified address");
+    connectMock.mockReturnValueOnce(mockSocket(Promise.reject(blocked)).socket);
+    await expect(connectTCP({ host: "127.0.0.1", port: 443 }, new AbortController().signal)).rejects.toBe(blocked);
+    expect(connectMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry a loop or port-25 rejection", async () => {
+    for (const message of ["TCP Loop detected", "Connections to port 25 are prohibited"]) {
+      connectMock.mockReset();
+      const failure = new Error(message);
+      connectMock.mockReturnValueOnce(mockSocket(Promise.reject(failure)).socket);
+      await expect(connectTCP({ host: "example.com", port: 25 }, new AbortController().signal)).rejects.toBe(failure);
+      expect(connectMock).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("retries one non-policy failure and returns the next opened socket", async () => {
+    const first = mockSocket(Promise.reject(new Error("temporary network failure")));
+    const second = mockSocket();
+    connectMock.mockReturnValueOnce(first.socket).mockReturnValueOnce(second.socket);
+
+    await expect(connectTCP({ host: "example.com", port: 443 }, new AbortController().signal)).resolves.toBe(
+      second.socket
+    );
+    expect(first.closeCalls()).toBe(1);
+    expect(second.closeCalls()).toBe(0);
+    expect(connectMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not exceed two attempts for repeated non-policy failures", async () => {
+    const first = mockSocket(Promise.reject(new Error("temporary failure one")));
+    const secondFailure = new Error("temporary failure two");
+    const second = mockSocket(Promise.reject(secondFailure));
+    connectMock.mockReturnValueOnce(first.socket).mockReturnValueOnce(second.socket);
+
+    await expect(connectTCP({ host: "example.com", port: 443 }, new AbortController().signal)).rejects.toBe(
+      secondFailure
+    );
+    expect(first.closeCalls()).toBe(1);
+    expect(second.closeCalls()).toBe(1);
+    expect(connectMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not retry when the caller aborts the attempt", async () => {
+    const pending = mockSocket(new Promise<SocketInfo>(() => undefined));
+    connectMock.mockReturnValueOnce(pending.socket);
+    const controller = new AbortController();
+    const opening = connectTCP({ host: "example.com", port: 443 }, controller.signal);
+    controller.abort();
+    await expect(opening).rejects.toThrow("connection canceled");
+    expect(connectMock).toHaveBeenCalledTimes(1);
     expect(pending.closeCalls()).toBe(1);
+  });
+
+  it("rejects a timed-out open without waiting for socket cleanup", async () => {
+    vi.useFakeTimers();
+    const pending = mockSocket(new Promise<SocketInfo>(() => undefined));
+    let closeCalled = false;
+    pending.socket.close = () => {
+      closeCalled = true;
+      return new Promise<void>(() => undefined);
+    };
+
+    const opening = waitForSocketOpen(pending.socket, new AbortController().signal, 10);
+    const outcome = opening.then(
+      () => ({ status: "opened" as const }),
+      (error: unknown) => ({ status: "rejected" as const, error })
+    );
+
+    await vi.advanceTimersByTimeAsync(10);
+
+    await expect(outcome).resolves.toMatchObject({
+      status: "rejected",
+      error: expect.objectContaining({ message: "TCP connection timed out" })
+    });
+    expect(closeCalled).toBe(true);
+  });
+
+  it("rejects an already-aborted open without waiting for socket cleanup", async () => {
+    const pending = mockSocket(new Promise<SocketInfo>(() => undefined));
+    let closeCalled = false;
+    pending.socket.close = () => {
+      closeCalled = true;
+      return new Promise<void>(() => undefined);
+    };
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(waitForSocketOpen(pending.socket, controller.signal)).rejects.toThrow("connection canceled");
+    expect(closeCalled).toBe(true);
+  });
+
+  it("times out a pending open and closes its socket", async () => {
+    vi.useFakeTimers();
+    const pending = mockSocket(new Promise<SocketInfo>(() => undefined));
+    const opening = waitForSocketOpen(pending.socket, new AbortController().signal, 10);
+    const outcome = opening.then(
+      () => ({ status: "opened" as const }),
+      (error: unknown) => ({ status: "rejected" as const, error })
+    );
+    await vi.advanceTimersByTimeAsync(10);
+    await expect(outcome).resolves.toMatchObject({
+      status: "rejected",
+      error: expect.objectContaining({ message: "TCP connection timed out" })
+    });
+    expect(pending.closeCalls()).toBe(1);
+  });
+
+  it("retries once after a timed-out open and keeps each attempt bounded", async () => {
+    vi.useFakeTimers();
+    const pending = mockSocket(new Promise<SocketInfo>(() => undefined));
+    const opened = mockSocket();
+    connectMock.mockReturnValueOnce(pending.socket).mockReturnValueOnce(opened.socket);
+    const opening = connectTCP({ host: "example.com", port: 443 }, new AbortController().signal);
+    const outcome = opening.then(
+      (socket) => ({ status: "opened" as const, socket }),
+      (error: unknown) => ({ status: "rejected" as const, error })
+    );
+
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    await expect(outcome).resolves.toEqual({ status: "opened", socket: opened.socket });
+    expect(connectMock).toHaveBeenCalledTimes(2);
+    expect(pending.closeCalls()).toBe(1);
+    expect(opened.closeCalls()).toBe(0);
   });
 });

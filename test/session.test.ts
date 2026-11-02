@@ -1,40 +1,61 @@
 import { describe, expect, it } from "vitest";
-import type { Credential } from "../src/auth";
-import { TunnelSession, type SessionOptions, type TunnelSessionDependencies } from "../src/websocket";
-import { requestBytes, VALID_UUID_BYTES } from "./fixtures";
-import { trRequest } from "./trojan-fixtures";
+import { Session, type SessionOptions, type SessionDependencies } from "../src/session";
+import type { Destination, HandshakeDecoder, HandshakeResult } from "../src/protocol";
+import {
+  ByteStreamTransportError,
+  type ByteStreamTransport,
+  type SessionCloseReason,
+  type UpstreamConnection
+} from "../src/transport";
 
-const credential: Credential = {
-  uuid: VALID_UUID_BYTES,
-  path: "/unit-test-path-0001"
-};
+const OPTIONS: SessionOptions = { handshakeTimeoutMs: 1_000 };
+const DESTINATION: Destination = { host: "example.net", port: 443 };
+const PREFIX = Uint8Array.of(0x41, 0x42);
 
-const options: SessionOptions = {
-  expectedHost: "edge.example.com",
-  protocolMode: "vl",
-  handshakeTimeoutMs: 100,
-  connectTimeoutMs: 100,
-  idleTimeoutMs: 2_000
-};
+class TestHandshakeDecoder implements HandshakeDecoder {
+  #buffer = new Uint8Array();
+  #complete = false;
 
-class MemorySocket implements Socket {
+  push(chunk: Uint8Array): HandshakeResult {
+    if (this.#complete) return { kind: "rejected", reason: "invalid_request" };
+    const combined = new Uint8Array(this.#buffer.byteLength + chunk.byteLength);
+    combined.set(this.#buffer);
+    combined.set(chunk, this.#buffer.byteLength);
+    this.#buffer = combined;
+
+    if (combined.byteLength < 2) return { kind: "incomplete" };
+    this.#complete = true;
+
+    if (combined[0] === 0xff) return { kind: "rejected", reason: "authentication_failed" };
+    if (combined[0] === 0xfe) return { kind: "rejected", reason: "unsupported_command" };
+    if (combined[0] !== PREFIX[0] || combined[1] !== PREFIX[1]) {
+      return { kind: "rejected", reason: "invalid_request" };
+    }
+
+    return {
+      kind: "complete",
+      handshake: {
+        destination: DESTINATION,
+        initialPayload: combined.slice(2),
+        response: Uint8Array.of(0xaa, 0x55)
+      }
+    };
+  }
+}
+
+class MemoryTransport implements ByteStreamTransport {
   readonly readable: ReadableStream<Uint8Array>;
   readonly writable: WritableStream<Uint8Array>;
-  readonly opened = Promise.resolve<SocketInfo>({ remoteAddress: "93.184.216.34:443" });
-  readonly upgraded = false;
-  readonly secureTransport = "off" as const;
   readonly writes: Uint8Array[] = [];
   readonly closed: Promise<void>;
-  concurrentWrites = 0;
-  maximumConcurrentWrites = 0;
-  closeCalls = 0;
-  #controller!: ReadableStreamDefaultController<Uint8Array>;
+  closeReason: SessionCloseReason | undefined;
+  #inputEnded = false;
   #resolveClosed!: () => void;
-  #ended = false;
-  readonly #writeDelayMs: number;
+  #controller!: ReadableStreamDefaultController<Uint8Array>;
+  readonly #failWrites: boolean;
 
-  constructor(writeDelayMs = 0) {
-    this.#writeDelayMs = writeDelayMs;
+  constructor(failWrites = false) {
+    this.#failWrites = failWrites;
     this.closed = new Promise((resolve) => {
       this.#resolveClosed = resolve;
     });
@@ -44,99 +65,111 @@ class MemorySocket implements Socket {
       }
     });
     this.writable = new WritableStream<Uint8Array>({
-      write: async (chunk) => {
-        this.concurrentWrites += 1;
-        this.maximumConcurrentWrites = Math.max(this.maximumConcurrentWrites, this.concurrentWrites);
-        if (this.#writeDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, this.#writeDelayMs));
+      write: (chunk) => {
+        if (this.#failWrites) throw new ByteStreamTransportError("synthetic transport write failure");
         this.writes.push(chunk.slice());
-        this.concurrentWrites -= 1;
       }
     });
   }
 
+  send(bytes: Uint8Array): void {
+    if (!this.#inputEnded && this.closeReason === undefined) {
+      this.#controller.enqueue(bytes.slice());
+    }
+  }
+
+  /** Ends only the client-to-session byte stream; it does not close the transport. */
+  endInput(): void {
+    if (this.#inputEnded) return;
+    this.#inputEnded = true;
+    this.#controller.close();
+  }
+
+  close(reason: SessionCloseReason): void {
+    if (this.closeReason !== undefined) return;
+    this.closeReason = reason;
+    this.endInput();
+    this.#resolveClosed();
+  }
+}
+
+class MemorySocket implements UpstreamConnection {
+  readonly readable: ReadableStream<Uint8Array>;
+  readonly writable: WritableStream<Uint8Array>;
+  readonly writes: Uint8Array[] = [];
+  readonly #writeDelayMs: number;
+  readonly #failWrites: boolean;
+  #readController!: ReadableStreamDefaultController<Uint8Array>;
+  #readEnded = false;
+  #concurrentWrites = 0;
+  #maximumConcurrentWrites = 0;
+  #closeCalls = 0;
+  #writeEnded = false;
+  readonly #failClose: boolean;
+
+  constructor(options: { writeDelayMs?: number; failWrites?: boolean; failClose?: boolean } = {}) {
+    this.#writeDelayMs = options.writeDelayMs ?? 0;
+    this.#failWrites = options.failWrites ?? false;
+    this.#failClose = options.failClose ?? false;
+    this.readable = new ReadableStream<Uint8Array>({
+      start: (controller) => {
+        this.#readController = controller;
+      }
+    });
+    this.writable = new WritableStream<Uint8Array>({
+      write: async (chunk) => {
+        this.#concurrentWrites += 1;
+        this.#maximumConcurrentWrites = Math.max(this.#maximumConcurrentWrites, this.#concurrentWrites);
+        try {
+          if (this.#writeDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, this.#writeDelayMs));
+          if (this.#failWrites) throw new Error("synthetic TCP write failure");
+          this.writes.push(chunk.slice());
+        } finally {
+          this.#concurrentWrites -= 1;
+        }
+      },
+      close: () => {
+        this.#writeEnded = true;
+      }
+    });
+  }
+
+  get closeCalls(): number {
+    return this.#closeCalls;
+  }
+
+  get maximumConcurrentWrites(): number {
+    return this.#maximumConcurrentWrites;
+  }
+
+  get writeEnded(): boolean {
+    return this.#writeEnded;
+  }
+
   push(bytes: Uint8Array): void {
-    this.#controller.enqueue(bytes);
+    if (!this.#readEnded) this.#readController.enqueue(bytes.slice());
   }
 
   end(): void {
-    if (this.#ended) return;
-    this.#ended = true;
-    this.#controller.close();
-    this.#resolveClosed();
+    if (this.#readEnded) return;
+    this.#readEnded = true;
+    this.#readController.close();
+  }
+
+  failRead(error = new Error("synthetic TCP read failure")): void {
+    if (this.#readEnded) return;
+    this.#readEnded = true;
+    this.#readController.error(error);
   }
 
   async close(): Promise<void> {
-    this.closeCalls += 1;
+    this.#closeCalls += 1;
     this.end();
-  }
-
-  startTls(): Socket {
-    return this;
+    if (this.#failClose) throw new Error("synthetic TCP close failure");
   }
 }
 
-async function binaryData(data: unknown): Promise<Uint8Array> {
-  if (data instanceof ArrayBuffer) return new Uint8Array(data);
-  if (data instanceof Blob) return new Uint8Array(await data.arrayBuffer());
-  if (ArrayBuffer.isView(data)) {
-    return new Uint8Array(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength));
-  }
-  throw new Error("expected binary message");
-}
-
-function nextMessage(socket: WebSocket): Promise<Uint8Array> {
-  return new Promise((resolve, reject) => {
-    const onClose = (event: CloseEvent) => reject(new Error(`socket closed before message: ${event.code}`));
-    socket.addEventListener("close", onClose, { once: true });
-    socket.addEventListener(
-      "message",
-      (event) => {
-        socket.removeEventListener("close", onClose);
-        void binaryData(event.data).then(resolve, reject);
-      },
-      { once: true }
-    );
-  });
-}
-
-function nextMessages(socket: WebSocket, count: number): Promise<Uint8Array[]> {
-  return new Promise((resolve, reject) => {
-    const messages: Uint8Array[] = [];
-    let conversionChain = Promise.resolve();
-
-    const cleanup = () => {
-      socket.removeEventListener("message", onMessage);
-      socket.removeEventListener("close", onClose);
-    };
-    const onClose = (event: CloseEvent) => {
-      cleanup();
-      reject(new Error(`socket closed after ${messages.length} of ${count} messages: ${event.code}`));
-    };
-    const onMessage = (event: MessageEvent) => {
-      conversionChain = conversionChain
-        .then(async () => {
-          messages.push(await binaryData(event.data));
-          if (messages.length === count) {
-            cleanup();
-            resolve(messages);
-          }
-        })
-        .catch((error: unknown) => {
-          cleanup();
-          reject(error);
-        });
-    };
-
-    socket.addEventListener("message", onMessage);
-    socket.addEventListener("close", onClose, { once: true });
-  });
-}
-
-function nextClose(socket: WebSocket): Promise<CloseEvent> {
-  return new Promise((resolve) => socket.addEventListener("close", resolve, { once: true }));
-}
-
-async function waitFor(predicate: () => boolean, timeoutMs = 500): Promise<void> {
+async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
     if (Date.now() >= deadline) throw new Error("condition timed out");
@@ -144,234 +177,87 @@ async function waitFor(predicate: () => boolean, timeoutMs = 500): Promise<void>
   }
 }
 
-function validSessionRequest(payload = new Uint8Array()): Uint8Array {
-  return requestBytes({
-    address: Uint8Array.from([11, ...new TextEncoder().encode("example.com")]),
-    payload
-  });
-}
-
 function createSession(
   socket: MemorySocket,
-  overrides: Partial<SessionOptions> = {},
-  dependencyOverrides: Partial<TunnelSessionDependencies> = {},
-  initialData?: Uint8Array
+  options: Partial<SessionOptions> = {},
+  dependencyOverrides: Partial<SessionDependencies> = {},
+  transport = new MemoryTransport()
 ) {
-  const pair = new WebSocketPair();
   let connectCalls = 0;
-  const dependencies: TunnelSessionDependencies = {
-    resolveDNS: async () => ["93.184.216.34"],
+  const dependencies: SessionDependencies = {
     connect: async () => {
       connectCalls += 1;
       return socket;
     },
     ...dependencyOverrides
   };
-  const session = new TunnelSession(pair[1], credential, { ...options, ...overrides }, dependencies);
-  session.start(initialData);
-  const response = new Response(null, { status: 101, webSocket: pair[0] });
-  const client = response.webSocket!;
-  client.binaryType = "arraybuffer";
-  client.accept({ allowHalfOpen: true });
+  const session = new Session(transport, new TestHandshakeDecoder(), { ...OPTIONS, ...options }, dependencies);
+  session.start();
   return {
-    client,
+    transport,
     get connectCalls() {
       return connectCalls;
     }
   };
 }
 
-describe("full-duplex tunnel session", () => {
-  it("uses a functioning in-runtime WebSocketPair harness", async () => {
-    const pair = new WebSocketPair();
-    pair[1].accept();
-    const response = new Response(null, { status: 101, webSocket: pair[0] });
-    const client = response.webSocket!;
-    client.binaryType = "arraybuffer";
-    client.accept();
-    const received = new Promise<unknown>((resolve) =>
-      pair[1].addEventListener("message", (event) => resolve(event.data), { once: true })
-    );
-    client.send(Uint8Array.of(1, 2, 3));
-    expect(await binaryData(await received)).toEqual(Uint8Array.of(1, 2, 3));
-    client.close(1000, "done");
+describe("transport- and protocol-independent session", () => {
+  it("rejects a second start without creating another session loop", () => {
+    const transport = new MemoryTransport();
+    const session = new Session(transport, new TestHandshakeDecoder(), OPTIONS, {
+      connect: async () => new MemorySocket()
+    });
+
+    session.start();
+    expect(() => session.start()).toThrow("session already started");
+    transport.close("normal");
   });
 
-  it("parses a handshake split across several WebSocket messages and preserves payload", async () => {
-    const socket = new MemorySocket();
-    const harness = createSession(socket, { protocolMode: "vl", TR_PASSWORD: "unit-test-tr-password" });
-    const response = nextMessage(harness.client);
-    const bytes = validSessionRequest(Uint8Array.of(9, 8, 7));
-    harness.client.send(bytes.subarray(0, 3));
-    harness.client.send(bytes.subarray(3, 19));
-    harness.client.send(bytes.subarray(19));
-    expect(await response).toEqual(Uint8Array.of(0, 0));
-    await waitFor(() => socket.writes.length === 1);
-    expect(socket.writes).toEqual([Uint8Array.of(9, 8, 7)]);
-    expect(harness.connectCalls).toBe(1);
-    harness.client.close(1000, "done");
-  });
+  it("ends an incomplete handshake when the client input stream reaches EOF", async () => {
+    const harness = createSession(new MemorySocket());
+    harness.transport.send(PREFIX.subarray(0, 1));
+    harness.transport.endInput();
 
-  it("keeps HTTP early data on the Vl parser when Tr is enabled", async () => {
-    const password = "unit-test-tr-password";
-    const socket = new MemorySocket();
-    const earlyData = trRequest(password);
-    const harness = createSession(socket, { protocolMode: "vl", TR_PASSWORD: password }, {}, earlyData);
-    const closeEvent = await nextClose(harness.client);
-
-    expect(closeEvent.code).toBe(1002);
-    expect(closeEvent.reason).toBe("invalid request");
+    await waitFor(() => harness.transport.closeReason !== undefined);
+    expect(harness.transport.closeReason).toBe("normal");
     expect(harness.connectCalls).toBe(0);
   });
 
-  it("accepts a fragmented Tr handshake without sending a Vl response header", async () => {
-    const password = "unit-test-tr-password";
-    const payload = Uint8Array.of(0x16, 0x03, 0x01, 0x00, 0x09, 0x01, 0x02, 0x03);
-    const request = trRequest(password, { host: "example.com", payload });
-    const socket = new MemorySocket();
-    const harness = createSession(socket, { protocolMode: "tr", TR_PASSWORD: password });
-    const destinationResponse = nextMessage(harness.client);
-
-    harness.client.send(request.subarray(0, 13));
-    harness.client.send(request.subarray(13, 57));
-    harness.client.send(request.subarray(57, 64));
-    harness.client.send(request.subarray(64));
-
-    await waitFor(() => socket.writes.length === 1);
-    expect(socket.writes).toEqual([payload]);
-    expect(harness.connectCalls).toBe(1);
-    await waitFor(() => socket.readable.locked);
-
-    const serverBytes = Uint8Array.of(0x16, 0x03, 0x03, 0x00, 0x04);
-    socket.push(serverBytes);
-    expect(await destinationResponse).toEqual(serverBytes);
-
-    harness.client.close(1000, "done");
-  });
-
-  it("rejects a Tr password mismatch before opening TCP", async () => {
-    const socket = new MemorySocket();
-    const harness = createSession(socket, { protocolMode: "tr", TR_PASSWORD: "unit-test-tr-password" });
-    const closed = nextClose(harness.client);
-    harness.client.send(trRequest("incorrect-password"));
-
-    const closeEvent = await closed;
-    expect(closeEvent.code).toBe(1008);
-    expect(closeEvent.reason).toBe("authentication failed");
-    expect(harness.connectCalls).toBe(0);
-  });
-
-  it("rejects an invalid UUID before opening TCP", async () => {
+  it("reassembles a handshake, preserves its payload and relays both stream directions", async () => {
     const socket = new MemorySocket();
     const harness = createSession(socket);
-    const closed = nextClose(harness.client);
-    const invalid = VALID_UUID_BYTES.slice();
-    invalid[0] = 1;
-    harness.client.send(requestBytes({ uuid: invalid }));
-    const closeEvent = await closed;
-    expect(closeEvent.code).toBe(1008);
-    expect(closeEvent.reason).toBe("authentication failed");
-    expect(harness.connectCalls).toBe(0);
+    const payload = Uint8Array.of(9, 8, 7);
+
+    harness.transport.send(PREFIX.subarray(0, 1));
+    harness.transport.send(Uint8Array.from([PREFIX[1]!, ...payload]));
+    await waitFor(() => socket.writes.length === 1 && harness.transport.writes.length === 1);
+
+    expect(harness.transport.writes[0]).toEqual(Uint8Array.of(0xaa, 0x55));
+    expect(socket.writes[0]).toEqual(payload);
+
+    socket.push(Uint8Array.of(1, 2, 3, 4));
+    await waitFor(() => harness.transport.writes.length === 2);
+    expect(harness.transport.writes[1]).toEqual(Uint8Array.of(1, 2, 3, 4));
+
+    harness.transport.close("normal");
+    await waitFor(() => socket.closeCalls === 1);
   });
 
-  it("rejects malformed binary handshakes without opening TCP", async () => {
+  it.each([
+    [0xff, "authentication_failed"],
+    [0xfe, "unsupported_command"],
+    [0xfd, "invalid_request"]
+  ] as const)("closes a rejected handshake with %s", async (marker, reason) => {
     const socket = new MemorySocket();
     const harness = createSession(socket);
-    const closed = nextClose(harness.client);
-    harness.client.send(Uint8Array.of(9));
-    const closeEvent = await closed;
-    expect(closeEvent.code).toBe(1002);
-    expect(closeEvent.reason).toBe("invalid request");
+    harness.transport.send(Uint8Array.of(marker, 0));
+
+    await waitFor(() => harness.transport.closeReason !== undefined);
+    expect(harness.transport.closeReason).toBe(reason);
     expect(harness.connectCalls).toBe(0);
   });
 
-  it("rejects UDP commands before resolving or connecting a destination", async () => {
-    let dnsCalls = 0;
-    const socket = new MemorySocket();
-    const harness = createSession(
-      socket,
-      {},
-      {
-        resolveDNS: async () => {
-          dnsCalls += 1;
-          return ["93.184.216.34"];
-        }
-      }
-    );
-    const closed = nextClose(harness.client);
-    harness.client.send(requestBytes({ command: 2 }));
-    const closeEvent = await closed;
-    expect(closeEvent.code).toBe(1008);
-    expect(closeEvent.reason).toBe("TCP command required");
-    expect(dnsCalls).toBe(0);
-    expect(harness.connectCalls).toBe(0);
-  });
-
-  it("reports destination-policy rejection to the client", async () => {
-    const socket = new MemorySocket();
-    const harness = createSession(socket);
-    const closed = nextClose(harness.client);
-    harness.client.send(requestBytes({ addressType: 1, address: Uint8Array.of(127, 0, 0, 1) }));
-    const closeEvent = await closed;
-    expect(closeEvent.code).toBe(1008);
-    expect(closeEvent.reason).toBe("private or reserved destination blocked");
-    expect(harness.connectCalls).toBe(0);
-  });
-
-  it("reports Cloudflare-owned ranges distinctly", async () => {
-    const socket = new MemorySocket();
-    const harness = createSession(socket);
-    const closed = nextClose(harness.client);
-    harness.client.send(requestBytes({ addressType: 1, address: Uint8Array.of(104, 16, 0, 1) }));
-    const closeEvent = await closed;
-    expect(closeEvent.code).toBe(1008);
-    expect(closeEvent.reason).toBe("Cloudflare-owned destination blocked");
-    expect(harness.connectCalls).toBe(0);
-  });
-
-  it("reports the platform-blocked destination port", async () => {
-    const socket = new MemorySocket();
-    const harness = createSession(socket);
-    const closed = nextClose(harness.client);
-    harness.client.send(requestBytes({ port: 25 }));
-    const closeEvent = await closed;
-    expect(closeEvent.code).toBe(1008);
-    expect(closeEvent.reason).toBe("destination port 25 is unavailable");
-    expect(harness.connectCalls).toBe(0);
-  });
-
-  it("reports attempts to connect to the Worker itself", async () => {
-    const socket = new MemorySocket();
-    const harness = createSession(socket);
-    const closed = nextClose(harness.client);
-    const hostname = new TextEncoder().encode("edge.example.com");
-    harness.client.send(requestBytes({ addressType: 2, address: Uint8Array.from([hostname.byteLength, ...hostname]) }));
-    const closeEvent = await closed;
-    expect(closeEvent.code).toBe(1008);
-    expect(closeEvent.reason).toBe("destination is this Worker");
-    expect(harness.connectCalls).toBe(0);
-  });
-
-  it("reports DNS failure without exposing resolver details", async () => {
-    const socket = new MemorySocket();
-    const harness = createSession(
-      socket,
-      {},
-      {
-        resolveDNS: async () => {
-          throw new Error("private resolver implementation detail");
-        }
-      }
-    );
-    const closed = nextClose(harness.client);
-    harness.client.send(validSessionRequest());
-    const closeEvent = await closed;
-    expect(closeEvent.code).toBe(1008);
-    expect(closeEvent.reason).toBe("DNS lookup failed");
-    expect(closeEvent.reason).not.toContain("private resolver");
-  });
-
-  it("reports TCP connect failure to the client", async () => {
+  it("does not expose TCP connection errors to the transport", async () => {
     const socket = new MemorySocket();
     const harness = createSession(
       socket,
@@ -382,203 +268,171 @@ describe("full-duplex tunnel session", () => {
         }
       }
     );
-    const closed = nextClose(harness.client);
-    harness.client.send(validSessionRequest());
-    const closeEvent = await closed;
-    expect(closeEvent.code).toBe(1011);
-    expect(closeEvent.reason).toBe("TCP connection failed");
-    expect(closeEvent.reason).not.toContain("private network");
+    harness.transport.send(PREFIX);
+
+    await waitFor(() => harness.transport.closeReason !== undefined);
+    expect(harness.transport.closeReason).toBe("tcp_failed");
   });
 
-  it("closes unauthenticated sessions at the handshake deadline", async () => {
-    const socket = new MemorySocket();
-    const harness = createSession(socket, { handshakeTimeoutMs: 20 });
-    const closeEvent = await nextClose(harness.client);
-    expect(closeEvent.code).toBe(1008);
-    expect(closeEvent.reason).toContain("handshake timed out");
+  it("closes an unauthenticated session at its handshake deadline", async () => {
+    const harness = createSession(new MemorySocket(), { handshakeTimeoutMs: 20 });
+    await waitFor(() => harness.transport.closeReason !== undefined);
+    expect(harness.transport.closeReason).toBe("handshake_timeout");
     expect(harness.connectCalls).toBe(0);
   });
 
-  it("aborts pending DNS resolution when the client closes", async () => {
-    const socket = new MemorySocket();
-    let resolverSignal: AbortSignal | undefined;
-    const harness = createSession(
-      socket,
-      { connectTimeoutMs: 1_000 },
-      {
-        resolveDNS: async (_hostname, signal) => {
-          resolverSignal = signal;
-          return new Promise<readonly string[]>((_resolve, reject) => {
-            signal?.addEventListener("abort", () => reject(new DOMException("DNS resolution aborted", "AbortError")), {
-              once: true
-            });
-          });
-        }
-      }
-    );
-
-    harness.client.send(validSessionRequest());
-    await waitFor(() => resolverSignal !== undefined);
-    harness.client.close(1000, "done");
-
-    await waitFor(() => resolverSignal?.aborted === true);
-    expect(harness.connectCalls).toBe(0);
-  });
-
-  it("bounds DNS resolution by the connect timeout even if a resolver ignores cancellation", async () => {
-    const socket = new MemorySocket();
-    let resolverSignal: AbortSignal | undefined;
-    const harness = createSession(
-      socket,
-      { connectTimeoutMs: 20 },
-      {
-        resolveDNS: async (_hostname, signal) => {
-          resolverSignal = signal;
-          return new Promise<readonly string[]>(() => undefined);
-        }
-      }
-    );
-    const closed = nextClose(harness.client);
-
-    harness.client.send(validSessionRequest());
-    expect((await closed).code).toBe(1011);
-
-    expect(resolverSignal?.aborted).toBe(true);
-    expect(harness.connectCalls).toBe(0);
-  });
-
-  it("aborts a pending TCP open when the client closes", async () => {
-    const socket = new MemorySocket();
+  it("aborts a pending TCP open when the transport closes", async () => {
     let connectSignal: AbortSignal | undefined;
-    let connectStarted = false;
     const harness = createSession(
-      socket,
-      { connectTimeoutMs: 1_000 },
+      new MemorySocket(),
+      {},
       {
-        connect: async (_destination, _timeoutMilliseconds, signal) => {
-          connectStarted = true;
+        connect: async (_destination, signal) => {
           connectSignal = signal;
-          return new Promise<Socket>((_resolve, reject) => {
-            signal?.addEventListener("abort", () => reject(new DOMException("TCP connection aborted", "AbortError")), {
+          return new Promise<UpstreamConnection>((_resolve, reject) => {
+            signal.addEventListener("abort", () => reject(new DOMException("canceled", "AbortError")), {
               once: true
             });
           });
         }
       }
     );
-
-    harness.client.send(validSessionRequest());
-    await waitFor(() => connectStarted && connectSignal !== undefined);
-    harness.client.close(1000, "done");
+    harness.transport.send(PREFIX);
+    await waitFor(() => connectSignal !== undefined);
+    harness.transport.close("normal");
 
     await waitFor(() => connectSignal?.aborted === true);
-    expect(socket.closeCalls).toBe(0);
   });
 
-  it("forwards destination bytes after the one-time response header", async () => {
+  it("closes a TCP connection that resolves after its session has ended", async () => {
+    let resolveConnect!: (connection: UpstreamConnection) => void;
+    const socket = new MemorySocket();
+    const harness = createSession(
+      socket,
+      {},
+      {
+        connect: async () =>
+          new Promise<UpstreamConnection>((resolve) => {
+            resolveConnect = resolve;
+          })
+      }
+    );
+    harness.transport.send(PREFIX);
+    await waitFor(() => resolveConnect !== undefined);
+    harness.transport.close("normal");
+    resolveConnect(socket);
+
+    await waitFor(() => socket.closeCalls === 1);
+  });
+
+  it("half-closes the TCP write direction when client input ends and continues destination output", async () => {
     const socket = new MemorySocket();
     const harness = createSession(socket);
-    const header = nextMessage(harness.client);
-    harness.client.send(validSessionRequest());
-    expect(await header).toEqual(Uint8Array.of(0, 0));
-    const payload = nextMessage(harness.client);
-    socket.push(Uint8Array.of(1, 2, 3, 4));
-    expect(await payload).toEqual(Uint8Array.of(1, 2, 3, 4));
-    harness.client.close(1000, "done");
+    harness.transport.send(PREFIX);
+    await waitFor(() => harness.transport.writes.length === 1);
+
+    harness.transport.endInput();
+    await waitFor(() => socket.writeEnded && !socket.writable.locked);
+    expect(harness.transport.closeReason).toBeUndefined();
+
+    socket.push(Uint8Array.of(5, 6, 7));
+    await waitFor(() => harness.transport.writes.length === 2);
+    expect(harness.transport.writes[1]).toEqual(Uint8Array.of(5, 6, 7));
+
+    socket.end();
+    await waitFor(() => harness.transport.closeReason === "normal");
   });
 
-  it("chunks large destination reads into bounded, ordered WebSocket messages", async () => {
+  it("keeps client input open after destination EOF until the client ends its stream", async () => {
     const socket = new MemorySocket();
     const harness = createSession(socket);
-    const header = nextMessage(harness.client);
-    harness.client.send(validSessionRequest());
-    expect(await header).toEqual(Uint8Array.of(0, 0));
-
-    const payload = Uint8Array.from({ length: 2 * 64 * 1024 + 17 }, (_, index) => index % 251);
-    const messages = nextMessages(harness.client, 3);
-    socket.push(payload);
-
-    const chunks = await messages;
-    expect(chunks.map((chunk) => chunk.byteLength)).toEqual([64 * 1024, 64 * 1024, 17]);
-    expect(chunks[0]).toEqual(payload.subarray(0, 64 * 1024));
-    expect(chunks[1]).toEqual(payload.subarray(64 * 1024, 2 * 64 * 1024));
-    expect(chunks[2]).toEqual(payload.subarray(2 * 64 * 1024));
-    harness.client.close(1000, "done");
-  });
-
-  it("closes idle authenticated sessions and releases TCP stream locks", async () => {
-    const socket = new MemorySocket();
-    const harness = createSession(socket, { idleTimeoutMs: 30 });
-    const header = nextMessage(harness.client);
-    const closed = nextClose(harness.client);
-    harness.client.send(validSessionRequest());
-    expect(await header).toEqual(Uint8Array.of(0, 0));
-
-    const closeEvent = await closed;
-    expect(closeEvent.code).toBe(1000);
-    expect(closeEvent.reason).toBe("connection idle timeout");
-    await waitFor(() => socket.closeCalls > 0 && !socket.readable.locked && !socket.writable.locked);
-  });
-
-  it("reciprocates client close and closes the TCP socket exactly once", async () => {
-    const socket = new MemorySocket();
-    const harness = createSession(socket);
-    const header = nextMessage(harness.client);
-    harness.client.send(validSessionRequest());
-    await header;
-    const reciprocalClose = nextClose(harness.client);
-    harness.client.close(1000, "done");
-    const closeEvent = await reciprocalClose;
-    expect(closeEvent.code).toBe(1000);
-    expect(closeEvent.reason).toBe("done");
-    await waitFor(() => socket.closeCalls > 0 && !socket.readable.locked && !socket.writable.locked);
-    expect(socket.closeCalls).toBe(1);
-  });
-
-  it("keeps the TCP writable half open after destination EOF until the client closes", async () => {
-    const socket = new MemorySocket();
-    const harness = createSession(socket, { idleTimeoutMs: 2_000 });
-    const header = nextMessage(harness.client);
-    harness.client.send(validSessionRequest());
-    expect(await header).toEqual(Uint8Array.of(0, 0));
+    harness.transport.send(PREFIX);
+    await waitFor(() => harness.transport.writes.length === 1);
 
     socket.end();
     await waitFor(() => !socket.readable.locked);
-    expect(socket.closeCalls).toBe(0);
-    expect(harness.client.readyState).toBe(WebSocket.OPEN);
+    expect(harness.transport.closeReason).toBeUndefined();
 
-    harness.client.send(Uint8Array.of(4, 5, 6));
+    harness.transport.send(Uint8Array.of(4, 5, 6));
     await waitFor(() => socket.writes.length === 1);
     expect(socket.writes).toEqual([Uint8Array.of(4, 5, 6)]);
 
-    const reciprocalClose = nextClose(harness.client);
-    harness.client.close(1000, "done");
-    expect((await reciprocalClose).code).toBe(1000);
-    await waitFor(() => socket.closeCalls > 0 && !socket.readable.locked && !socket.writable.locked);
-    expect(socket.closeCalls).toBe(1);
+    harness.transport.endInput();
+    await waitFor(() => harness.transport.closeReason === "normal");
   });
 
-  it("serializes client writes and preserves ordering under backpressure", async () => {
-    const socket = new MemorySocket(5);
+  it("serializes client writes and preserves order under TCP backpressure", async () => {
+    const socket = new MemorySocket({ writeDelayMs: 5 });
     const harness = createSession(socket);
-    const header = nextMessage(harness.client);
-    harness.client.send(validSessionRequest());
-    await header;
-    harness.client.send(Uint8Array.of(1));
-    harness.client.send(Uint8Array.of(2));
-    harness.client.send(Uint8Array.of(3));
+    harness.transport.send(PREFIX);
+    await waitFor(() => harness.transport.writes.length === 1);
+
+    harness.transport.send(Uint8Array.of(1));
+    harness.transport.send(Uint8Array.of(2));
+    harness.transport.send(Uint8Array.of(3));
     await waitFor(() => socket.writes.length === 3);
     expect(socket.writes).toEqual([Uint8Array.of(1), Uint8Array.of(2), Uint8Array.of(3)]);
     expect(socket.maximumConcurrentWrites).toBe(1);
-    harness.client.close(1000, "done");
+
+    harness.transport.close("normal");
   });
 
-  it("enforces the bounded inbound write queue", async () => {
+  it("closes after a TCP read failure", async () => {
     const socket = new MemorySocket();
-    const harness = createSession(socket, { handshakeTimeoutMs: 2_000 });
-    const closed = nextClose(harness.client);
-    harness.client.send(new Uint8Array(1024 * 1024 + 1));
-    expect((await closed).code).toBe(1009);
-    expect(harness.connectCalls).toBe(0);
+    const harness = createSession(socket);
+    harness.transport.send(PREFIX);
+    await waitFor(() => harness.transport.writes.length === 1);
+    socket.failRead();
+
+    await waitFor(() => harness.transport.closeReason !== undefined);
+    expect(harness.transport.closeReason).toBe("tcp_failed");
+  });
+
+  it("closes when the destination writable stream rejects a client write", async () => {
+    const socket = new MemorySocket({ failWrites: true });
+    const harness = createSession(socket);
+    harness.transport.send(PREFIX);
+    await waitFor(() => harness.transport.writes.length === 1);
+    harness.transport.send(Uint8Array.of(9));
+
+    await waitFor(() => harness.transport.closeReason !== undefined);
+    expect(harness.transport.closeReason).toBe("tcp_failed");
+  });
+
+  it("closes when the transport writable stream rejects destination output and releases upstream locks", async () => {
+    const socket = new MemorySocket();
+    const transport = new MemoryTransport(true);
+    const harness = createSession(socket, {}, {}, transport);
+    harness.transport.send(PREFIX);
+
+    await waitFor(() => harness.transport.closeReason !== undefined);
+    await waitFor(() => socket.closeCalls === 1 && !socket.readable.locked && !socket.writable.locked);
+    expect(harness.transport.closeReason).toBe("transport_failed");
+  });
+
+  it("releases a pending upstream reader when socket close rejects after closing streams", async () => {
+    const socket = new MemorySocket({ failClose: true });
+    const harness = createSession(socket);
+    harness.transport.send(PREFIX);
+    await waitFor(() => harness.transport.writes.length === 1 && socket.readable.locked);
+    harness.transport.close("normal");
+
+    await waitFor(() => socket.closeCalls === 1 && !socket.readable.locked && !socket.writable.locked);
+    expect(socket.closeCalls).toBe(1);
+  });
+
+  it("rejects invalid timeout configuration before starting", () => {
+    const transport = new MemoryTransport();
+    expect(
+      () =>
+        new Session(
+          transport,
+          new TestHandshakeDecoder(),
+          { ...OPTIONS, handshakeTimeoutMs: 0 },
+          {
+            connect: async () => new MemorySocket()
+          }
+        )
+    ).toThrow(RangeError);
   });
 });

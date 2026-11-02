@@ -1,16 +1,12 @@
-import { parseCredential, parseWebSocketPath } from "./auth";
-import { TunnelSession, type SessionOptions } from "./websocket";
+import type { Env } from "./env";
+import { createHandshakeDecoder, type HandshakeDecoder, type ProtocolMode } from "./protocol";
+import { Session, type SessionOptions, type SessionDependencies } from "./session";
+import { connectTCP } from "./transport/tcp";
+import { upgradeWebSocket } from "./transport/websocket";
 
-interface Env {
-  readonly UUID: string;
-  readonly VL_PATH: string;
-  readonly TR_PASSWORD: string;
-  readonly TR_PATH: string;
-}
-
-const HTTPS_PORTS = new Set(["", "443", "2053", "2083", "2087", "2096", "8443"]);
-const MAX_EARLY_DATA_BYTES = 2048;
-const MAX_EARLY_DATA_BASE64URL_LENGTH = Math.ceil((MAX_EARLY_DATA_BYTES * 4) / 3);
+// The path is the endpoint's first secret; a minimum length keeps it unguessable.
+const ENDPOINT_PATH_PATTERN = /^\/[A-Za-z0-9_-]{16,128}$/;
+const SESSION_OPTIONS: SessionOptions = { handshakeTimeoutMs: 10_000 };
 
 const NOT_FOUND_HEADERS = {
   "Cache-Control": "no-store",
@@ -24,89 +20,73 @@ function notFound(): Response {
   return new Response("Not Found\n", { status: 404, headers: NOT_FOUND_HEADERS });
 }
 
-function decodeWebSocketEarlyData(value: string): Uint8Array | undefined {
-  if (
-    value.length === 0 ||
-    value.length > MAX_EARLY_DATA_BASE64URL_LENGTH ||
-    value.length % 4 === 1 ||
-    !/^[A-Za-z0-9_-]+$/.test(value)
-  ) {
-    return undefined;
-  }
+function misconfigured(): Response {
+  return new Response("Misconfigured\n", { status: 500, headers: NOT_FOUND_HEADERS });
+}
 
-  const base64 = value.replaceAll("-", "+").replaceAll("_", "/");
-  const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
-  let decoded: string;
+interface Endpoint {
+  readonly path: string;
+  readonly createDecoder: () => HandshakeDecoder;
+}
+
+/**
+ * Both protocols are mandatory. Throws a message naming the offending binding
+ * (never its value) when a required binding is unusable.
+ */
+function loadEndpoints(env: Env): Record<ProtocolMode, Endpoint> {
+  for (const name of ["UUID", "VL_PATH", "TR_PASSWORD", "TR_PATH"] as const) {
+    if (typeof env[name] !== "string" || env[name].length === 0) throw new Error(`${name} is not configured`);
+  }
+  for (const name of ["VL_PATH", "TR_PATH"] as const) {
+    if (!ENDPOINT_PATH_PATTERN.test(env[name])) throw new Error(`${name} is invalid`);
+  }
+  if (env.VL_PATH === env.TR_PATH) throw new Error("VL_PATH and TR_PATH must differ");
+
+  const vl = (): HandshakeDecoder => createHandshakeDecoder("vl", { uuid: env.UUID });
+  const tr = (): HandshakeDecoder => createHandshakeDecoder("tr", { password: env.TR_PASSWORD });
   try {
-    decoded = atob(padded);
+    vl();
   } catch {
-    return undefined;
+    throw new Error("UUID is invalid");
   }
-  if (decoded.length === 0 || decoded.length > MAX_EARLY_DATA_BYTES) return undefined;
-
-  const bytes = new Uint8Array(decoded.length);
-  for (let index = 0; index < decoded.length; index += 1) {
-    bytes[index] = decoded.charCodeAt(index);
+  try {
+    tr();
+  } catch {
+    throw new Error("TR_PASSWORD is invalid");
   }
-  // Vl version 0 is the expected first byte. Full validation remains in VlHandshakeParser.
-  if (bytes[0] !== 0) return undefined;
-  return bytes;
+  return { vl: { path: env.VL_PATH, createDecoder: vl }, tr: { path: env.TR_PATH, createDecoder: tr } };
 }
 
-function sessionOptions(
-  expectedHost: string,
-  protocolMode: "vl" | "tr",
-  trPassword: string | undefined
-): SessionOptions {
+export function createWorker(dependencies: SessionDependencies = { connect: connectTCP }): ExportedHandler<Env> {
   return {
-    expectedHost,
-    protocolMode,
-    TR_PASSWORD: trPassword || undefined,
-    handshakeTimeoutMs: 10_000,
-    connectTimeoutMs: 10_000,
-    idleTimeoutMs: 300_000
-  };
+    async fetch(request: Request, env: Env): Promise<Response> {
+      const url = new URL(request.url);
+      if (request.method !== "GET" || url.protocol !== "https:") return notFound();
+      if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") return notFound();
+
+      let endpoints: Record<ProtocolMode, Endpoint>;
+      try {
+        endpoints = loadEndpoints(env);
+      } catch (error) {
+        console.error(error instanceof Error ? error.message : "invalid configuration");
+        return misconfigured();
+      }
+
+      const endpoint =
+        url.pathname === endpoints.vl.path
+          ? endpoints.vl
+          : url.pathname === endpoints.tr.path
+            ? endpoints.tr
+            : undefined;
+      if (endpoint === undefined) return notFound();
+
+      return (
+        upgradeWebSocket(request, (transport) => {
+          new Session(transport, endpoint.createDecoder(), SESSION_OPTIONS, dependencies).start();
+        }) ?? notFound()
+      );
+    }
+  } satisfies ExportedHandler<Env>;
 }
 
-export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url);
-    if (request.method !== "GET" || url.protocol !== "https:" || !HTTPS_PORTS.has(url.port)) return notFound();
-    if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") return notFound();
-
-    const credential = parseCredential(env.UUID, env.VL_PATH);
-    const trPath = env.TR_PATH ? parseWebSocketPath(env.TR_PATH) : undefined;
-
-    // Vl and Tr use separate paths during the experiment. If the paths
-    // collide, fail closed instead of guessing which protocol was intended.
-    if (trPath !== undefined && trPath === credential.path) return notFound();
-
-    const isVlPath = url.pathname === credential.path;
-    const isTrPath = trPath !== undefined && url.pathname === trPath;
-    if (!isVlPath && !isTrPath) return notFound();
-    if (isTrPath && (!env.TR_PASSWORD || new TextEncoder().encode(env.TR_PASSWORD).byteLength > 512)) {
-      return notFound();
-    }
-
-    const protocolMode = isTrPath ? "tr" : "vl";
-
-    // HTTP-level early data is supported only by the Vl path.
-    const earlyDataHeader = request.headers.get("Sec-WebSocket-Protocol");
-    if (protocolMode === "tr" && earlyDataHeader !== null) return notFound();
-    const earlyData = earlyDataHeader === null ? undefined : decodeWebSocketEarlyData(earlyDataHeader);
-    if (earlyDataHeader !== null && earlyData === undefined) return notFound();
-
-    const pair = new WebSocketPair();
-    const client = pair[0];
-    const server = pair[1];
-    const session = new TunnelSession(
-      server,
-      credential,
-      sessionOptions(url.hostname, protocolMode, protocolMode === "tr" ? env.TR_PASSWORD : undefined)
-    );
-    session.start(earlyData);
-    const headers = new Headers();
-    if (earlyDataHeader !== null) headers.set("Sec-WebSocket-Protocol", earlyDataHeader);
-    return new Response(null, { status: 101, webSocket: client, headers });
-  }
-} satisfies ExportedHandler<Env>;
+export default createWorker();

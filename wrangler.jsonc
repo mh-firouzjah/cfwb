@@ -3,7 +3,7 @@
   "name": "cfwb",
   "main": "src/index.ts",
   "compatibility_date": "2026-07-12",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_flags": ["nodejs_compat", "pipe_to_backward_propagation"],
   "workers_dev": true,
   "preview_urls": false,
   "secrets": {
