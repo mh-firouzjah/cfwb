@@ -77,8 +77,7 @@ class MemoryUpstreamConnection implements UpstreamConnection {
     if (!this.#readEnded) this.#controller.enqueue(bytes.slice());
   }
 
-  async close(): Promise<void> {
-    this.#closeCalls += 1;
+  endReadable(): void {
     if (this.#readEnded) return;
     this.#readEnded = true;
     try {
@@ -86,6 +85,11 @@ class MemoryUpstreamConnection implements UpstreamConnection {
     } catch {
       // The session may already have canceled or closed the readable side.
     }
+  }
+
+  async close(): Promise<void> {
+    this.#closeCalls += 1;
+    this.endReadable();
   }
 }
 

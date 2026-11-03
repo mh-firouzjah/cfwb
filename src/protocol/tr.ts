@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 
 import { concatenate, decodeDomain, formatIPv4, formatIPv6, type Destination } from "./wire";
 
@@ -43,14 +43,6 @@ interface HeaderParseResult {
   readonly headerLength: number;
 }
 
-function constantTimeHashMatch(received: Uint8Array, expected: Uint8Array): boolean {
-  let difference = received.byteLength ^ expected.byteLength;
-  for (let index = 0; index < PASSWORD_HASH_BYTES; index += 1) {
-    difference |= (received[index] ?? 0) ^ (expected[index] ?? 0);
-  }
-  return difference === 0;
-}
-
 function parseHeader(bytes: Uint8Array, expectedPasswordHash: Uint8Array): HeaderParseResult | undefined {
   const digestPrefixLength = Math.min(bytes.byteLength, PASSWORD_HASH_BYTES);
   for (let index = 0; index < digestPrefixLength; index += 1) {
@@ -61,7 +53,7 @@ function parseHeader(bytes: Uint8Array, expectedPasswordHash: Uint8Array): Heade
 
   if (bytes.byteLength < PASSWORD_HASH_BYTES + 2) return undefined;
 
-  if (!constantTimeHashMatch(bytes.subarray(0, PASSWORD_HASH_BYTES), expectedPasswordHash)) {
+  if (!timingSafeEqual(bytes.subarray(0, PASSWORD_HASH_BYTES), expectedPasswordHash)) {
     throw new TrProtocolError("authentication_failed");
   }
   if (bytes[PASSWORD_HASH_BYTES] !== CRLF || bytes[PASSWORD_HASH_BYTES + 1] !== LF) {

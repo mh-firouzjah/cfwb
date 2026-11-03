@@ -61,9 +61,10 @@ export function createWorker(dependencies: SessionDependencies = { connect: conn
   return {
     async fetch(request: Request, env: Env): Promise<Response> {
       const url = new URL(request.url);
-      if (request.method !== "GET" || url.protocol !== "https:") return notFound();
-      if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") return notFound();
+      if (url.protocol !== "https:") return notFound();
 
+      const isWebSocket = request.headers.get("Upgrade")?.toLowerCase() === "websocket";
+      if (isWebSocket && request.method !== "GET") return notFound();
       let endpoints: Record<ProtocolMode, Endpoint>;
       try {
         endpoints = loadEndpoints(env);
@@ -80,11 +81,14 @@ export function createWorker(dependencies: SessionDependencies = { connect: conn
             : undefined;
       if (endpoint === undefined) return notFound();
 
-      return (
-        upgradeWebSocket(request, (transport) => {
-          new Session(transport, endpoint.createDecoder(), SESSION_OPTIONS, dependencies).start();
-        }) ?? notFound()
-      );
+      if (isWebSocket) {
+        return (
+          upgradeWebSocket(request, (transport) => {
+            new Session(transport, endpoint.createDecoder(), SESSION_OPTIONS, dependencies).start();
+          }) ?? notFound()
+        );
+      }
+      return notFound();
     }
   } satisfies ExportedHandler<Env>;
 }

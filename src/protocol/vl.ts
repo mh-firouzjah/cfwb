@@ -170,10 +170,9 @@ export function parseVlUUID(value: string): Uint8Array {
 }
 
 export function authenticateVlUser(provided: Uint8Array, expected: Uint8Array): boolean {
-  const normalizedProvided = new Uint8Array(VL_USER_ID_BYTES);
-  normalizedProvided.set(provided.subarray(0, normalizedProvided.length));
-  const normalizedExpected = new Uint8Array(VL_USER_ID_BYTES);
-  normalizedExpected.set(expected.subarray(0, normalizedExpected.length));
-  const bytesMatch = timingSafeEqual(normalizedProvided, normalizedExpected);
-  return bytesMatch && provided.length === VL_USER_ID_BYTES && expected.length === VL_USER_ID_BYTES;
+  return (
+    provided.byteLength === VL_USER_ID_BYTES &&
+    expected.byteLength === VL_USER_ID_BYTES &&
+    timingSafeEqual(provided, expected)
+  );
 }
