@@ -60,7 +60,7 @@ describe("VLESS version-0 protocol", () => {
     expect(result.request).toMatchObject({
       version: 0,
       command: "tcp",
-      destination: { host: "example", port: 443 }
+      destination: { host: "gstatic", port: 443 }
     });
     expect(result.request.userId).toEqual(VALID_UUID_BYTES);
     expect(result.initialPayload).toEqual(payload);

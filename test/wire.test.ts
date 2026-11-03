@@ -32,6 +32,6 @@ describe("wire helpers", () => {
     expect(decodeDomain(encode("a:443"))).toBeUndefined();
     expect(decodeDomain(encode("ü.example"))).toBeUndefined();
     expect(decodeDomain(Uint8Array.of(0xc3, 0x28))).toBeUndefined();
-    expect(decodeDomain(Uint8Array.of(0xef, 0xbb, 0xbf, ...encode("example.com")))).toBeUndefined();
+    expect(decodeDomain(Uint8Array.of(0xef, 0xbb, 0xbf, ...encode("gstatic.com")))).toBeUndefined();
   });
 });

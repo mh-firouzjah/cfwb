@@ -34,7 +34,7 @@ describe("Trojan protocol", () => {
 
   it("parses a fragmented header and preserves initial TCP payload", () => {
     const payload = Uint8Array.of(0x16, 0x03, 0x01, 0x00, 0x09, 0x01, 0x02, 0x03);
-    const bytes = trRequest(PASSWORD, { host: "www.example.com", payload });
+    const bytes = trRequest(PASSWORD, { host: "www.gstatic.com", payload });
     const parser = new TrHandshakeParser(PASSWORD);
 
     expect(parser.push(bytes.subarray(0, 13))).toBeUndefined();
@@ -42,7 +42,7 @@ describe("Trojan protocol", () => {
     expect(parser.push(bytes.subarray(57, 64))).toBeUndefined();
     const parsed = parser.push(bytes.subarray(64));
 
-    expect(parsed?.destination).toEqual({ host: "www.example.com", port: 443 });
+    expect(parsed?.destination).toEqual({ host: "www.gstatic.com", port: 443 });
     expect(parsed?.initialPayload).toEqual(payload);
   });
 
@@ -97,7 +97,7 @@ describe("Trojan protocol", () => {
   });
 
   it("bounds incomplete headers and forbids parser reuse after completion", () => {
-    const request = trRequest(PASSWORD, { host: "example.com" });
+    const request = trRequest(PASSWORD, { host: "gstatic.com" });
     expect(() => new TrHandshakeParser(PASSWORD, 64).push(request.subarray(0, 64))).toThrowError(
       expect.objectContaining({ code: "handshake_too_large" })
     );
@@ -111,7 +111,7 @@ describe("Trojan protocol", () => {
 
   it("accepts every split point in a valid handshake", () => {
     const payload = Uint8Array.of(1, 2, 3);
-    const bytes = trRequest(PASSWORD, { host: "example.com", payload });
+    const bytes = trRequest(PASSWORD, { host: "gstatic.com", payload });
     const headerLength = bytes.byteLength - payload.byteLength;
 
     for (let split = 1; split < headerLength; split += 1) {
@@ -119,7 +119,7 @@ describe("Trojan protocol", () => {
       expect(parser.push(bytes.subarray(0, split))).toBeUndefined();
       const parsed = parser.push(bytes.subarray(split));
       expect(parsed?.initialPayload).toEqual(payload);
-      expect(parsed?.destination).toEqual({ host: "example.com", port: 443 });
+      expect(parsed?.destination).toEqual({ host: "gstatic.com", port: 443 });
     }
   });
 
@@ -145,7 +145,7 @@ describe("Trojan protocol", () => {
 
   it("keeps deterministic mutations of authenticated handshakes inside the protocol error boundary", () => {
     const random = xorshift32(0x51a7e);
-    const valid = trRequest(PASSWORD, { host: "example.com", payload: Uint8Array.of(1, 2, 3, 4) });
+    const valid = trRequest(PASSWORD, { host: "gstatic.com", payload: Uint8Array.of(1, 2, 3, 4) });
 
     for (let caseIndex = 0; caseIndex < 1_000; caseIndex += 1) {
       const bytes = valid.slice();

@@ -18,7 +18,7 @@ export function requestBytes(
 ): Uint8Array {
   const uuid = options.uuid ?? VALID_UUID_BYTES;
   const addons = options.addons ?? new Uint8Array();
-  const address = options.address ?? Uint8Array.from([7, ...new TextEncoder().encode("example")]);
+  const address = options.address ?? Uint8Array.from([7, ...new TextEncoder().encode("gstatic")]);
   const payload = options.payload ?? new Uint8Array();
   const port = options.port ?? 443;
   return Uint8Array.from([

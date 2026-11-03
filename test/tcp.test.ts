@@ -96,7 +96,7 @@ describe("outbound TCP open", () => {
       connectMock.mockReset();
       const failure = new Error(message);
       connectMock.mockReturnValueOnce(mockSocket(Promise.reject(failure)).socket);
-      await expect(connectTCP({ host: "example.com", port: 25 }, new AbortController().signal)).rejects.toBe(failure);
+      await expect(connectTCP({ host: "gstatic.com", port: 25 }, new AbortController().signal)).rejects.toBe(failure);
       expect(connectMock).toHaveBeenCalledTimes(1);
     }
   });
@@ -106,7 +106,7 @@ describe("outbound TCP open", () => {
     const second = mockSocket();
     connectMock.mockReturnValueOnce(first.socket).mockReturnValueOnce(second.socket);
 
-    await expect(connectTCP({ host: "example.com", port: 443 }, new AbortController().signal)).resolves.toBe(
+    await expect(connectTCP({ host: "gstatic.com", port: 443 }, new AbortController().signal)).resolves.toBe(
       second.socket
     );
     expect(first.closeCalls()).toBe(1);
@@ -120,7 +120,7 @@ describe("outbound TCP open", () => {
     const second = mockSocket(Promise.reject(secondFailure));
     connectMock.mockReturnValueOnce(first.socket).mockReturnValueOnce(second.socket);
 
-    await expect(connectTCP({ host: "example.com", port: 443 }, new AbortController().signal)).rejects.toBe(
+    await expect(connectTCP({ host: "gstatic.com", port: 443 }, new AbortController().signal)).rejects.toBe(
       secondFailure
     );
     expect(first.closeCalls()).toBe(1);
@@ -132,7 +132,7 @@ describe("outbound TCP open", () => {
     const pending = mockSocket(new Promise<SocketInfo>(() => undefined));
     connectMock.mockReturnValueOnce(pending.socket);
     const controller = new AbortController();
-    const opening = connectTCP({ host: "example.com", port: 443 }, controller.signal);
+    const opening = connectTCP({ host: "gstatic.com", port: 443 }, controller.signal);
     controller.abort();
     await expect(opening).rejects.toThrow("connection canceled");
     expect(connectMock).toHaveBeenCalledTimes(1);
@@ -198,7 +198,7 @@ describe("outbound TCP open", () => {
     const pending = mockSocket(new Promise<SocketInfo>(() => undefined));
     const opened = mockSocket();
     connectMock.mockReturnValueOnce(pending.socket).mockReturnValueOnce(opened.socket);
-    const opening = connectTCP({ host: "example.com", port: 443 }, new AbortController().signal);
+    const opening = connectTCP({ host: "gstatic.com", port: 443 }, new AbortController().signal);
     const outcome = opening.then(
       (socket) => ({ status: "opened" as const, socket }),
       (error: unknown) => ({ status: "rejected" as const, error })

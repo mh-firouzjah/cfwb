@@ -9,20 +9,32 @@
       "port": 443,
       "initial_payload_hex": "010203",
       "fragmentations": [
-        { "name": "single chunk", "chunk_sizes": [29] },
-        { "name": "header split after UUID", "chunk_sizes": [18, 11] }
+        {
+          "name": "single chunk",
+          "chunk_sizes": [29]
+        },
+        {
+          "name": "header split after UUID",
+          "chunk_sizes": [18, 11]
+        }
       ]
     },
     {
       "name": "domain",
-      "wire_hex": "0000112233445566778899aabbccddeeff000101bb020b6578616d706c652e636f6d",
+      "wire_hex": "0000112233445566778899aabbccddeeff000101bb020b677374617469632e636f6d",
       "address_type": "domain",
-      "host": "example.com",
+      "host": "gstatic.com",
       "port": 443,
       "initial_payload_hex": "",
       "fragmentations": [
-        { "name": "single chunk", "chunk_sizes": [34] },
-        { "name": "header split after UUID", "chunk_sizes": [18, 16] }
+        {
+          "name": "single chunk",
+          "chunk_sizes": [34]
+        },
+        {
+          "name": "header split after UUID",
+          "chunk_sizes": [18, 16]
+        }
       ]
     },
     {
@@ -33,8 +45,14 @@
       "port": 443,
       "initial_payload_hex": "aabb",
       "fragmentations": [
-        { "name": "single chunk", "chunk_sizes": [40] },
-        { "name": "header split after UUID", "chunk_sizes": [18, 22] }
+        {
+          "name": "single chunk",
+          "chunk_sizes": [40]
+        },
+        {
+          "name": "header split after UUID",
+          "chunk_sizes": [18, 22]
+        }
       ]
     }
   ]

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { Session, type SessionOptions, type SessionDependencies } from "../src/session";
 import type { Destination, HandshakeDecoder, HandshakeResult } from "../src/protocol";
+import { Session, type SessionDependencies, type SessionOptions } from "../src/session";
 import {
   ByteStreamTransportError,
   type ByteStreamTransport,
@@ -9,7 +9,7 @@ import {
 } from "../src/transport";
 
 const OPTIONS: SessionOptions = { handshakeTimeoutMs: 1_000 };
-const DESTINATION: Destination = { host: "example.net", port: 443 };
+const DESTINATION: Destination = { host: "gstatic.net", port: 443 };
 const PREFIX = Uint8Array.of(0x41, 0x42);
 
 class TestHandshakeDecoder implements HandshakeDecoder {

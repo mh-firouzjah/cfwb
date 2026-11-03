@@ -14,7 +14,7 @@ export function trRequest(
   } = {}
 ): Uint8Array {
   const addressType = options.addressType ?? 3;
-  const addressBytes = options.addressBytes ?? encoder.encode(options.host ?? "example.com");
+  const addressBytes = options.addressBytes ?? encoder.encode(options.host ?? "gstatic.com");
   const port = options.port ?? 443;
   const header = Uint8Array.from([
     ...encoder.encode(sha224Hex(encoder.encode(password))),

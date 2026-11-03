@@ -1,9 +1,9 @@
 import { createExecutionContext, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import worker, { createWorker } from "../src/index";
-import { requestBytes, VALID_UUID } from "./fixtures";
 import type { Destination } from "../src/protocol";
 import type { UpstreamConnection } from "../src/transport";
+import { requestBytes, VALID_UUID } from "./fixtures";
 import { trRequest } from "./trojan-fixtures";
 
 const TEST_VL_PATH = "/unit-test-path-0001";
@@ -147,13 +147,13 @@ async function openTestClient(handler: ReturnType<typeof createWorker>, path: st
 
 describe("Worker HTTP and WebSocket boundary", () => {
   it("serves an innocuous HTTP response without proxy disclosure", async () => {
-    const response = await SELF.fetch("https://edge.example.com/");
+    const response = await SELF.fetch("https://edge.gstatic.com/");
     expect(response.status).toBe(404);
     expect(await response.text()).toBe("Not Found\n");
   });
 
   it("rejects non-WebSocket requests to the endpoint", async () => {
-    const response = await SELF.fetch(`https://edge.example.com${TEST_VL_PATH}`);
+    const response = await SELF.fetch(`https://edge.gstatic.com${TEST_VL_PATH}`);
     expect(response.status).toBe(404);
   });
 
@@ -176,14 +176,14 @@ describe("Worker HTTP and WebSocket boundary", () => {
   });
 
   it("rejects an invalid path without identifying the endpoint", async () => {
-    const response = await SELF.fetch("https://edge.example.com/wrong", {
+    const response = await SELF.fetch("https://edge.gstatic.com/wrong", {
       headers: { Upgrade: "websocket" }
     });
     expect(response.status).toBe(404);
   });
 
   it("rejects plaintext HTTP WebSocket upgrades with the generic response", async () => {
-    const response = await SELF.fetch(`http://edge.example.com${TEST_VL_PATH}`, { headers: { Upgrade: "websocket" } });
+    const response = await SELF.fetch(`http://edge.gstatic.com${TEST_VL_PATH}`, { headers: { Upgrade: "websocket" } });
     expect(response.status).toBe(404);
     expect(await response.text()).toBe("Not Found\n");
     expect(response.headers.get("Cache-Control")).toBe("no-store");
@@ -251,7 +251,7 @@ describe("Worker HTTP and WebSocket boundary", () => {
       name: "VLESS",
       path: TEST_VL_PATH,
       wire: requestBytes({
-        address: Uint8Array.from([11, ...new TextEncoder().encode("example.com")]),
+        address: Uint8Array.from([11, ...new TextEncoder().encode("gstatic.com")]),
         payload: Uint8Array.of(1, 2, 3)
       }),
       initialPayload: Uint8Array.of(1, 2, 3),
@@ -260,7 +260,7 @@ describe("Worker HTTP and WebSocket boundary", () => {
     {
       name: "Trojan",
       path: TEST_TR_PATH,
-      wire: trRequest(TEST_TR_PASSWORD, { host: "example.com", payload: Uint8Array.of(1, 2, 3) }),
+      wire: trRequest(TEST_TR_PASSWORD, { host: "gstatic.com", payload: Uint8Array.of(1, 2, 3) }),
       initialPayload: Uint8Array.of(1, 2, 3),
       responseHeader: undefined
     }
@@ -283,7 +283,7 @@ describe("Worker HTTP and WebSocket boundary", () => {
     }
     await waitFor(() => upstream.writes.length === 1);
     expect(upstream.writes[0]).toEqual(testCase.initialPayload);
-    expect(connectedDestinations).toEqual([{ host: "example.com", port: 443 }]);
+    expect(connectedDestinations).toEqual([{ host: "gstatic.com", port: 443 }]);
 
     client.send(Uint8Array.of(4, 5, 6));
     await waitFor(() => upstream.writes.length === 2);
@@ -440,7 +440,7 @@ describe("Worker HTTP and WebSocket boundary", () => {
   });
 
   it("rejects malformed WebSocket early data", async () => {
-    const response = await SELF.fetch(`https://edge.example.com${TEST_VL_PATH}`, {
+    const response = await SELF.fetch(`https://edge.gstatic.com${TEST_VL_PATH}`, {
       headers: {
         Upgrade: "websocket",
         "Sec-WebSocket-Protocol": "not base64url!"
@@ -450,14 +450,14 @@ describe("Worker HTTP and WebSocket boundary", () => {
   });
 
   it("does not police inbound ports; Cloudflare decides which ports reach the Worker", async () => {
-    const response = await SELF.fetch(`https://edge.example.com:8080${TEST_VL_PATH}`, {
+    const response = await SELF.fetch(`https://edge.gstatic.com:8080${TEST_VL_PATH}`, {
       headers: { Upgrade: "websocket" }
     });
     expectUpgrade(response);
   });
 
   it("closes on text frames", async () => {
-    const response = await SELF.fetch(`https://edge.example.com${TEST_VL_PATH}`, {
+    const response = await SELF.fetch(`https://edge.gstatic.com${TEST_VL_PATH}`, {
       headers: { Upgrade: "websocket" }
     });
     const socket = response.webSocket!;

@@ -13,7 +13,7 @@ describe("protocol handshake adapters", () => {
     expect(decoder.push(requestBytes({ payload }))).toEqual({
       kind: "complete",
       handshake: {
-        destination: { host: "example", port: 443 },
+        destination: { host: "gstatic", port: 443 },
         initialPayload: payload,
         response: Uint8Array.of(0, 0)
       }
@@ -27,7 +27,7 @@ describe("protocol handshake adapters", () => {
     expect(decoder.push(trRequest(PASSWORD, { payload }))).toEqual({
       kind: "complete",
       handshake: {
-        destination: { host: "example.com", port: 443 },
+        destination: { host: "gstatic.com", port: 443 },
         initialPayload: payload
       }
     });
