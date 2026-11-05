@@ -3,6 +3,8 @@ import type { Destination } from "../contracts";
 import type { UpstreamConnection } from "./index";
 
 const CONNECT_TIMEOUT_MS = 10_000;
+/** Largest chunk read from the upstream socket (and so sent as one client message). */
+const READ_CHUNK_BYTES = 64 * 1024;
 const MAX_CONNECT_ATTEMPTS = 2;
 
 const PLATFORM_DENIAL_MESSAGES = [
@@ -38,13 +40,51 @@ export async function connectTCP(destination: Destination, signal: AbortSignal):
       const socket = connect({ hostname: destination.host, port: destination.port }, { allowHalfOpen: true });
       void socket.closed.catch(() => undefined);
       await waitForSocketOpen(socket, signal);
-      return socket;
+      return {
+        readable: readInLargeChunks(socket.readable, READ_CHUNK_BYTES),
+        writable: socket.writable,
+        close: () => socket.close()
+      };
     } catch (error) {
       if (signal.aborted || isPlatformDenied(error) || attempt + 1 >= MAX_CONNECT_ATTEMPTS) throw error;
     }
   }
 
   throw new Error("TCP connection failed");
+}
+
+/**
+ * Re-reads a byte stream with a BYOB reader. The runtime's default reader hands
+ * out chunks of at most 4 KiB, which costs one stream round trip and one
+ * client message per 4 KiB; a BYOB read returns whatever is available up to
+ * `chunkBytes` without waiting to fill the buffer, so latency is unchanged.
+ */
+export function readInLargeChunks(source: ReadableStream<Uint8Array>, chunkBytes: number): ReadableStream<Uint8Array> {
+  const reader = source.getReader({ mode: "byob" });
+  return new ReadableStream({
+    type: "bytes",
+    autoAllocateChunkSize: chunkBytes,
+    async pull(controller) {
+      const request = controller.byobRequest;
+      const requested = request?.view;
+      if (request === null || requested === null || requested === undefined) return;
+      let view = new Uint8Array(requested.buffer, requested.byteOffset, requested.byteLength);
+      for (;;) {
+        const result = await reader.read(view);
+        if (result.done) {
+          controller.close();
+          request.respond(0);
+          return;
+        }
+        if (result.value.byteLength > 0) {
+          request.respondWithNewView(result.value);
+          return;
+        }
+        view = new Uint8Array(result.value.buffer);
+      }
+    },
+    cancel: (reason) => reader.cancel(reason)
+  });
 }
 
 /** Waits for the runtime open result and closes the socket on timeout, abort, or failure. */
