@@ -11,7 +11,7 @@
   },
   "scripts": {
     "check": "npm --silent run format:check; f=$?; npm --silent run lint; l=$?; npm --silent run typecheck; t=$?; npm --silent test; s=$?; printf '\\ncheck summary (0=ok): format=%s lint=%s typecheck=%s test=%s\\n' \"$f\" \"$l\" \"$t\" \"$s\"; [ \"$f$l$t$s\" = 0000 ]",
-    "deploy": "wrangler deploy",
+    "deploy": "wrangler deploy --secrets-file .dev.vars",
     "dev": "wrangler dev",
     "format": "prettier --write README.md src test vitest.config.ts wrangler.jsonc tsconfig.json package.json",
     "format:check": "prettier --log-level=warn --list-different README.md src test vitest.config.ts wrangler.jsonc tsconfig.json package.json",

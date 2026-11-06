@@ -22,10 +22,7 @@ Both protocols are mandatory; the Worker answers every request with a 500 and
 logs the offending binding name (never its value) until all four are valid.
 
 ```sh
-npx wrangler secret put UUID
-npx wrangler secret put VL_PATH
-npx wrangler secret put TR_PASSWORD
-npx wrangler secret put TR_PATH
+python3 -c 'import secrets,uuid; open(".dev.vars","w").write("\n".join(["UUID="+str(uuid.uuid4()), "VL_PATH=/"+secrets.token_urlsafe(24), "TR_PASSWORD="+secrets.token_urlsafe(32), "TR_PATH=/"+secrets.token_urlsafe(24)]))'
 npm run deploy
 ```
 
